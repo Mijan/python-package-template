@@ -62,10 +62,3 @@ jobs:
         with:
           name: test-results-${{ matrix.python-version }}
           path: test-results
-
-      - name: Publish unit test results
-        if: always()
-        uses: EnricoMi/publish-unit-test-result-action@v2
-        with:
-          files: |
-            test-results/pytest-results-*.xml
