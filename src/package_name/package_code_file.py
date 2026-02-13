@@ -1,7 +1,5 @@
 class PackageClass:
-    """
-    Empty template class
-    """
+    """Empty template class"""
 
     def __init__(self):
         pass
