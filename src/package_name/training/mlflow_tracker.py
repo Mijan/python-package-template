@@ -3,7 +3,7 @@ mlflow_tracker.py — Lightweight wrapper for MLflow experiment tracking.
 
 Drop this file into any training repo.  Import and use as:
 
-    from mlflow_tracker import TrackedRun
+    from package_name.training.mlflow_tracker import TrackedRun
 
     with TrackedRun("transformer-v1", run_name="lr-sweep-003") as run:
         run.log_params({"lr": 1e-4, "batch_size": 32, "n_layers": 6})
@@ -28,7 +28,8 @@ import platform
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, Literal
 
 import mlflow
 from mlflow.entities import RunStatus
@@ -37,7 +38,12 @@ from mlflow.entities import RunStatus
 # Configuration
 # ---------------------------------------------------------------------------
 
-_DEFAULT_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+_FALLBACK_TRACKING_URI = "http://localhost:5000"
+
+
+def _tracking_uri_from_env() -> str:
+    """Return the tracking URI from the environment or the local fallback."""
+    return os.getenv("MLFLOW_TRACKING_URI", _FALLBACK_TRACKING_URI)
 
 
 def _detect_environment() -> str:
@@ -97,7 +103,7 @@ class TrackedRun:
     _run: Any = field(default=None, init=False, repr=False)
 
     def __enter__(self) -> "TrackedRun":
-        uri = self.tracking_uri or _DEFAULT_TRACKING_URI
+        uri = self.tracking_uri or _tracking_uri_from_env()
         mlflow.set_tracking_uri(uri)
         mlflow.set_experiment(self.experiment)
 
@@ -113,7 +119,12 @@ class TrackedRun:
         self._run = mlflow.start_run(run_name=self.run_name, tags=merged_tags)
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> Literal[False]:
         if exc_type is not None:
             mlflow.set_tag("error", str(exc_val)[:250])
             mlflow.end_run(status=RunStatus.to_string(RunStatus.FAILED))
@@ -149,6 +160,9 @@ class TrackedRun:
 
     @property
     def run_id(self) -> str:
+        if self._run is None:
+            msg = "TrackedRun has not started yet. Use it inside a 'with' block."
+            raise RuntimeError(msg)
         return self._run.info.run_id
 
 
@@ -159,8 +173,8 @@ class TrackedRun:
 
 def quick_log(
     experiment: str,
-    params: dict,
-    metrics: dict,
+    params: dict[str, Any],
+    metrics: dict[str, float],
     run_name: str | None = None,
 ) -> str:
     """One-shot: log a single set of params + metrics and return the run ID.
@@ -181,7 +195,7 @@ if __name__ == "__main__":
     _log = _logging.getLogger(__name__)
 
     # Smoke test — verifies connectivity to the tracking server.
-    _log.info("Tracking URI : %s", _DEFAULT_TRACKING_URI)
+    _log.info("Tracking URI : %s", _tracking_uri_from_env())
     _log.info("Environment  : %s", _detect_environment())
     _log.info("Git SHA      : %s", _git_sha() or "(not in a git repo)")
 
