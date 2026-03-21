@@ -6,8 +6,7 @@ This repository is a **clean, reusable template** for building Python
 packages with:
 
 -   Modern `src/` layout
--   A `training/` area for ML-specific utilities
--   A lightweight MLflow tracker for experiment logging
+-   A lightweight training profiler with W&B integration
 -   Reproducible testing via **tox**
 -   Automated CI via **GitHub Actions**
 -   Consistent formatting and static analysis
@@ -16,8 +15,8 @@ packages with:
 It is intended for developers or teams maintaining **multiple internal
 Python packages** who want consistent quality gates and minimal setup
 friction. In this version, the template is tuned for **personal ML
-projects** that need a small amount of experiment infrastructure without
-pulling in a larger framework.
+projects** that need lightweight experiment tracking without pulling in
+a larger framework.
 
 ------------------------------------------------------------------------
 
@@ -32,11 +31,11 @@ pulling in a larger framework.
 
 ### ML Training Utilities
 
--   `src/package_name/training/` for training-related helpers
--   `mlflow_tracker.py` with a `TrackedRun` context manager
--   Runtime configuration through environment variables
--   Automatic tags for environment, Python version, and git SHA when
-    available
+-   `src/package_name/profiler.py` — per-phase wall-clock profiler with
+    optional CUDA synchronization
+-   CSV logging of per-batch and per-epoch timing breakdowns
+-   W&B (Weights & Biases) logger for experiment metrics and phase
+    timings
 
 ### Testing & Quality (tox)
 
@@ -72,7 +71,8 @@ internal packages.
     ├── pyproject.toml
     ├── requirements.txt
     ├── src/package_name/
-    │   └── training/mlflow_tracker.py
+    │   ├── profiler.py
+    │   └── package_code_file.py
     ├── tests/
     ├── tox.ini
     └── README.md
@@ -110,8 +110,9 @@ Edit:
 specifiers**\
 (no `-r`, no `--extra-index-url`, no editable installs).
 
-If you do not want MLflow in a given project, remove it from
-`requirements.txt` and delete `src/package_name/training/mlflow_tracker.py`.
+If you do not want the profiler in a given project, remove `torch`,
+`numpy`, and `wandb` from `requirements.txt` and delete
+`src/package_name/profiler.py`.
 
 ### 4. Install Locally
 
@@ -139,74 +140,116 @@ Push to GitHub --- CI runs automatically on:
 -   pull request
 -   manual trigger
 
-## MLflow Tracker
+------------------------------------------------------------------------
+
+## Training Profiler
 
 ### Purpose
 
-The tracker in
-`src/package_name/training/mlflow_tracker.py`
-provides a thin wrapper around MLflow so your training scripts can log
-experiments with very little boilerplate. It is intended for personal ML
-projects where you want:
+`src/package_name/profiler.py` provides three composable classes for
+profiling training loops and logging results:
 
--   A consistent way to start and end runs
--   Environment-driven configuration instead of hardcoded credentials
--   Useful default tags without repeating setup code in every project
+| Class | Role |
+|---|---|
+| `PhaseTimer` | Times named phases within each batch; optionally syncs CUDA |
+| `ProfileLogger` | Writes per-batch and per-epoch CSV logs to disk |
+| `WandbLogger` | Logs epoch metrics and phase timings to Weights & Biases |
 
-### Configuration
+### W&B Configuration
 
-The tracker reads MLflow connection details from environment variables:
-
--   `MLFLOW_TRACKING_URI`
--   `MLFLOW_TRACKING_USERNAME`
--   `MLFLOW_TRACKING_PASSWORD`
-
-Example:
+Log in to W&B before running your script:
 
 ``` bash
-export MLFLOW_TRACKING_URI="https://mlflow.yourdomain.com"
-export MLFLOW_TRACKING_USERNAME="your-user"
-export MLFLOW_TRACKING_PASSWORD="your-password"
+wandb login
 ```
 
-If `MLFLOW_TRACKING_URI` is not set, the tracker falls back to
-`http://localhost:5000`.
+Or set the API key via environment variable:
 
-### Usage
-
-Basic example:
-
-``` python
-from package_name.training.mlflow_tracker import TrackedRun
-
-with TrackedRun("my-experiment", run_name="baseline") as run:
-    run.log_params({"lr": 1e-4, "batch_size": 32})
-    run.log_metrics({"train_loss": 0.42}, step=1)
-    run.log_artifact("artifacts/model.pt")
+``` bash
+export WANDB_API_KEY="your-key-here"
 ```
 
-For one-shot logging, use `quick_log`:
+### Usage Example
 
 ``` python
-from package_name.training.mlflow_tracker import quick_log
+import torch
+from package_name.profiler import PhaseTimer, ProfileLogger, WandbLogger
 
-run_id = quick_log(
-    experiment="my-experiment",
-    params={"lr": 1e-4},
-    metrics={"val_accuracy": 0.91},
-    run_name="final-metrics",
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = ...
+optimizer = ...
+dataloader = ...
+
+timer = PhaseTimer(device=device)
+csv_logger = ProfileLogger(log_dir="logs/profiler")
+wb = WandbLogger(
+    config={"lr": 1e-4, "batch_size": 32},
+    project="my-project",
+    run_name="baseline",
 )
+
+for epoch in range(num_epochs):
+    timer.batch_records.clear()
+    timer.records.clear()
+
+    for batch_idx, batch in enumerate(dataloader):
+        # Annotate the batch with any metadata you want in the CSV
+        timer.start_batch(batch_idx=batch_idx, batch_size=len(batch))
+
+        with timer.time("forward"):
+            loss = model(batch)
+
+        with timer.time("backward"):
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        timer.end_batch()
+
+    # Print a timing summary to stdout
+    timer.summary()
+
+    # Write CSVs
+    csv_logger.log_epoch(epoch, timer)
+
+    # Log to W&B
+    wb.log_epoch({"epoch": epoch, "loss": loss.item()})
+    wb.log_phase_timings(timer)
+
+wb.finish()
 ```
 
-### Default Behavior
+#### Output files
 
-Each run automatically attaches a few useful tags:
+| File | Contents |
+|---|---|
+| `logs/profiler/profiler_batches.csv` | One row per batch — metadata + per-phase durations + GPU memory |
+| `logs/profiler/profiler_epochs.csv` | One row per phase per epoch — mean/std/min/max/total |
 
--   `env` for the detected runtime environment
--   `python` for the Python version
--   `git_sha` when the current repository is a git checkout
+#### Profiler without W&B
 
-You can add extra tags by passing `tags={...}` to `TrackedRun`.
+`PhaseTimer` and `ProfileLogger` have no wandb dependency and can be
+used standalone:
+
+``` python
+from package_name.profiler import PhaseTimer, ProfileLogger
+
+timer = PhaseTimer()
+logger = ProfileLogger(log_dir="logs/profiler")
+
+for epoch in range(num_epochs):
+    timer.batch_records.clear()
+    timer.records.clear()
+    for batch_idx, batch in enumerate(dataloader):
+        timer.start_batch(batch_idx=batch_idx)
+        with timer.time("forward"):
+            ...
+        with timer.time("backward"):
+            ...
+        timer.end_batch()
+    logger.log_epoch(epoch, timer)
+    timer.summary()
+```
 
 ------------------------------------------------------------------------
 
