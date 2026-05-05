@@ -133,6 +133,28 @@ Modules should depend on interfaces, not on each other. Specifically:
   reimplementation of internal logic. If the API is inconvenient, fix the
   API, do not duplicate it.
 
+### Translate at boundaries; do not modify endpoints to fit each other
+
+When two modules disagree on a convention (frame, units, schema), the right
+fix is a translator class at the boundary, not patching either endpoint.
+The endpoints stay correct relative to their own domain; the translator is
+the only place that knows about both and reconciles them. This is sharper
+than orthogonality: even when an endpoint *could* internalise a conversion
+(e.g. via a flag), prefer an external translator class so the boundary is
+named and isolated.
+
+- Translators carry the assumption explicitly in their type/name (e.g. a
+  `MetricToImperialAdapter` wrapping a metric-units sensor for an
+  imperial-units consumer), so the cost of the translation is visible at
+  the call site rather than hidden inside one of the endpoints.
+- One endpoint with a configurable convention is a smell: the convention
+  becomes a global setting that propagates through every call. Multiple
+  thin translators are healthier.
+- The "right" endpoint to leave alone is the one that is correct in its
+  own domain — a third-party library staying bit-exact with its upstream,
+  a data source faithfully representing the source format, etc. The
+  translator is the only thing that needs to know both worlds.
+
 ### No silent fallbacks for missing data
 
 If a loss function requires M >= 2 samples to compute variance, and it
@@ -152,6 +174,24 @@ must be told.
   capability. A silent fallback that returns a plausible but incorrect
   result is worse than a crash. The only acceptable silent fallback is
   when the fallback behaviour is provably correct.
+
+### Validation errors must contain the remediation
+
+When a class rejects an input at construction or call time, the
+`ValueError` (or other exception) message must tell the caller exactly how
+to fix it. "X is not Y" is insufficient; "X is not Y. Wrap it in `Z(...)`."
+is the minimum bar. This is especially load-bearing at numerically-critical
+boundaries (frame conventions, unit conventions, schema mismatches), where
+a silent wrong output is the alternative to a clear error.
+
+- The reader of the error should not need to open the source file to fix
+  the problem. Include the remediation snippet, the suggested adapter, or
+  the exact configuration change.
+- Pair with type-tagged contracts (enums, properties) so validation can
+  catch mismatches at construction rather than after data has flowed.
+- Do not auto-correct the situation silently — the user should see the wrap
+  / convert / cast in their own code, not have it inserted under the hood.
+  Auto-correction is exactly the silent-bug pattern this rule prevents.
 
 ### Parameters belong inside closures, not alongside them
 
@@ -229,6 +269,25 @@ derived properties should not be conflated with defining properties.
 - Properties that can be computed from defining properties should be exposed
   as derived `@property` methods, not stored as redundant fields. If
   computation is expensive, use caching.
+
+### Shared utilities live in neutral modules; layering must not invert
+
+When two sibling packages need the same helper, accept the small refactor
+to move it to a shared, neutral module rather than reaching across package
+boundaries or duplicating the helper into each consumer. Cross-package
+imports that invert the natural layering are a smell that compounds.
+
+- A library package must never import from an application package. If a
+  library needs something an application provides, that something is
+  mis-located and belongs in a neutral top-level module that both can
+  import from.
+- Inlining a small helper into a second consumer to avoid the refactor is
+  technical debt: the day the two copies diverge silently is the day the
+  bug ships.
+- "Neutral" means the module sits at or above the level of every consumer
+  in the dependency graph. A helper used by two sibling packages belongs
+  at the top of the namespace (e.g. `<project_root>/<helper>.py`), not
+  inside one of them.
 
 ### Never import private symbols across module boundaries
 
