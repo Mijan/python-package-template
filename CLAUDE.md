@@ -289,6 +289,41 @@ imports that invert the natural layering are a smell that compounds.
   at the top of the namespace (e.g. `<project_root>/<helper>.py`), not
   inside one of them.
 
+### Organize by dependency layer, not by feature slice, when components are coupled
+
+Vertical feature-slices — one package per feature, each owning its own types,
+logic, and API — work only when the features are genuinely independent. When
+components are coupled (they exchange data, form a pipeline, or feed back into
+each other), feature-slicing forces them to import one another and the
+dependency graph tangles or cycles.
+
+Decompose by dependency layer instead:
+
+- Shared **data types and contracts** — the vocabulary components exchange — go
+  *down* into a core layer that everything depends on.
+- Shared **algorithms** — generic, reusable machinery — go *down* into a layer
+  written against the core types only.
+- The **wiring** that composes components into a specific pipeline goes *up*
+  into an orchestration layer.
+- Feature/domain modules sit in between: each depends only on the layers below
+  it, never on a sibling.
+
+**A feedback loop in data flow must never become a cycle in the code
+dependency graph.** If module A produces what B consumes and B produces what A
+consumes, do not let A and B import each other. Define the exchanged objects in
+the core layer; both depend on core; an orchestrator on top closes the loop.
+The loop is real in the data and absent from the code.
+
+- The whole dependency graph must be a DAG. In a single repo nothing enforces
+  this but discipline — add an import-linter to CI so a layer violation fails
+  the build.
+- Decomposition test: can two components be built, tested, and reasoned about
+  without importing each other? If yes, they are correctly layered. If not, the
+  shared part has not been pushed far enough down.
+- This is the constructive counterpart to *Shared utilities live in neutral
+  modules; layering must not invert* — that rule says don't break the layering;
+  this one says how to choose it.
+
 ### Never import private symbols across module boundaries
 
 If a symbol has a leading underscore, it is internal to its module. Other
