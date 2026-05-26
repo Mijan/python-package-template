@@ -27,7 +27,7 @@
 
 ### Classes and OOP
 
-- All class members must be **private** (`_` prefix) or **protected** (`_`
+- All class members must be **private** (`__` prefix) or **protected** (`_`
   prefix) by default. Only expose through `@property` getters. Provide
   setters only when mutation is explicitly part of the design.
 - Use `@property` (not methods) for structural attributes that describe what
@@ -93,7 +93,24 @@ These principles govern how classes and modules are structured. They are not
 optional style preferences; they are hard requirements that prevent the kind
 of design drift that creates bugs and technical debt.
 
-### Classes must mirror the domain, not the implementation
+The principles are grouped by topic:
+
+- **A. Class shape and content** — what belongs in a class.
+- **B. Typed interfaces over untyped data** — dicts and positional indices vs.
+  named, typed fields.
+- **C. Constants and single source of truth** — where structural constants
+  live and how they avoid duplication.
+- **D. Module boundaries and layering** — how modules relate, who can import
+  what.
+- **E. Validation and errors** — when to raise, what error messages must
+  contain.
+- **F. ML / Neural network specifics** — patterns specific to ML model code.
+
+---
+
+### A. Class shape and content
+
+#### Classes must mirror the domain, not the implementation
 
 When designing a class, ask: "what is this thing mathematically / conceptually?"
 The fields and methods should match that answer, nothing more.
@@ -103,7 +120,34 @@ The fields and methods should match that answer, nothing more.
   That algorithm should derive Z from X and Y, or Z should live on the
   algorithm's side.
 
-### No free-floating functions for logic that has state or identity
+#### Distinguish structural properties from behavioral properties
+
+A domain object often has two kinds of information: what it IS (structure)
+and what it DOES (behavior). These should be represented separately, and
+derived properties should not be conflated with defining properties.
+
+- If two properties of an object seem related but can diverge in edge cases,
+  they are separate concepts and must be stored or computed independently.
+- Properties that can be computed from defining properties should be exposed
+  as derived `@property` methods, not stored as redundant fields. If
+  computation is expensive, use caching.
+
+#### Separate defining parameters from runtime inputs
+
+A domain object's parameters (the values that define what it IS) must be
+distinguished from the inputs it receives at execution time.
+
+- A neural network is defined by its architecture and weights. The input
+  tensor is a runtime argument to `forward()`, not a constructor parameter.
+- A domain model is defined by its structure and parameters. Runtime inputs
+  (initial states, time spans, solver settings) are passed separately at
+  the call site, not stored in the same config or params object.
+- When a factory constructs a domain object, its params dataclass should
+  contain only defining parameters.
+- This separation prevents conflation in sampling, serialization, and
+  composition.
+
+#### No free-floating functions for logic that has state or identity
 
 If a function constructs something, transforms something, or dispatches based
 on type, it likely belongs as a classmethod, factory method, or method on an
@@ -117,7 +161,94 @@ helpers, tensor manipulation).
   via properties. Raw lambdas are acceptable only for throwaway one-liners in
   tests or examples, never in production code paths.
 
-### Orthogonality: consumers must not know about producers
+#### Parameters belong inside closures, not alongside them
+
+When a function is parameterized (e.g., a scoring function with
+coefficients), the parameters should be captured at construction time, not
+passed separately at every call site.
+
+- Bad: store `score_fn` and `score_params` as parallel fields, pass params
+  to fn at every evaluation.
+- Good: the scoring callable captures its params in a closure. The call
+  site just invokes `score(state)` with no extra arguments.
+- The closure should be a callable class (not a raw lambda) so that captured
+  parameters are accessible via a `.params` property for serialization and
+  debugging.
+
+---
+
+### B. Typed interfaces over untyped data
+
+#### String-keyed dicts are not a typed interface
+
+When a function or factory accepts configuration through `dict[str, float]`
+or `dict[str, Any]`, the caller gets no type checking, no IDE
+autocompletion, and no safe refactoring. A misspelled key (`k_prodd` instead
+of `k_prod`) silently produces a runtime KeyError, not a type error.
+
+- If a function takes more than two related parameters that could be
+  misspelled, group them into a frozen dataclass with named, typed fields.
+- If a factory constructs objects from a parameter set, the parameter set
+  must be a typed dataclass, not a dict. The factory should be generic over
+  the params type.
+- The single place where string-keyed dicts are converted to typed params is
+  a dedicated `from_dict()` or `params_from_dict()` method. No other code
+  should index into a params dict by string key.
+- If two modules need to share parameter values, Python variable binding
+  is sufficient when parameters are typed
+  dataclass fields. No special "sharing" machinery is needed.
+
+#### Positional indexing into flat tensors is not an API
+
+If a tensor has semantic slots (e.g., params[0] = rate_constant, params[1] =
+k_m), the mapping must be defined in exactly one place (a frozen dataclass
+with `to_tensor()` / `from_tensor()` methods). No code outside that dataclass
+should index into the tensor by position.
+
+---
+
+### C. Constants and single source of truth
+
+#### Structural constants and identities belong inside the class
+
+If a constant is intrinsic to a specific class, it must be a `ClassVar` on
+that class, not a module-level variable. Module-level constants are acceptable
+only for values that are genuinely module-wide (e.g., a logger instance, a
+global registry).
+
+- When multiple classes in the same module each have their own structural
+  constants, module-level placement creates ambiguity about which constant
+  belongs to which class.
+- Constants that callers might want to customize should be exposed through
+  the constructor with the `ClassVar` as the default, not frozen at module
+  scope.
+
+#### Structural constants must have a single source of truth
+
+When a dimension, count, or schema is determined by one module and consumed
+by another, define it in exactly one place and have all consumers derive
+from that definition. Never duplicate a constant across files, even if both
+files agree on the value today.
+
+- If a feature vector has N channels, define an Enum listing the channels in
+  the module that constructs the vector. Export `N = len(TheEnum)`. Consumers
+  import N rather than hardcoding it.
+- Never store structural constants (dimensions determined by data format) in
+  config. Config is for hyperparameters (values the user chooses). A dimension
+  dictated by the code is not a hyperparameter; it is a derived property.
+- If adding a new channel to a feature vector requires changing more than two
+  locations (the enum + the builder function), the abstraction is leaking.
+- When a field has associated metadata (valid range, unit, description),
+  co-locate the metadata with the field definition. For dataclass fields, use
+  `dataclasses.field(metadata={...})`. A field name that appears in two
+  places (once in the dataclass, once in a separate dict of metadata keyed by
+  string) is a duplication bug waiting to happen.
+
+---
+
+### D. Module boundaries and layering
+
+#### Orthogonality: consumers must not know about producers
 
 Modules should depend on interfaces, not on each other. Specifically:
 
@@ -133,7 +264,7 @@ Modules should depend on interfaces, not on each other. Specifically:
   reimplementation of internal logic. If the API is inconvenient, fix the
   API, do not duplicate it.
 
-### Translate at boundaries; do not modify endpoints to fit each other
+#### Translate at boundaries; do not modify endpoints to fit each other
 
 When two modules disagree on a convention (frame, units, schema), the right
 fix is a translator class at the boundary, not patching either endpoint.
@@ -155,122 +286,7 @@ named and isolated.
   a data source faithfully representing the source format, etc. The
   translator is the only thing that needs to know both worlds.
 
-### No silent fallbacks for missing data
-
-If a loss function requires M >= 2 samples to compute variance, and it
-receives M = 1, it must raise a ValueError, not silently return zero. Silent
-fallbacks hide bugs. The caller made an error (passed insufficient data) and
-must be told.
-
-- Never return a zero tensor as a "safe default" for a loss that cannot be
-  computed. This creates a gradient dead zone that is invisible during
-  training.
-- Never silently squeeze, unsqueeze, or reshape tensors to make shapes
-  match. If the input has the wrong number of dimensions, raise a clear error
-  stating the expected and actual shapes.
-- When dispatching on a capability via `hasattr` or `Protocol`, the
-  fallback branch (the object lacks the capability) must raise a clear
-  error if the operation cannot produce correct results without the
-  capability. A silent fallback that returns a plausible but incorrect
-  result is worse than a crash. The only acceptable silent fallback is
-  when the fallback behaviour is provably correct.
-
-### Validation errors must contain the remediation
-
-When a class rejects an input at construction or call time, the
-`ValueError` (or other exception) message must tell the caller exactly how
-to fix it. "X is not Y" is insufficient; "X is not Y. Wrap it in `Z(...)`."
-is the minimum bar. This is especially load-bearing at numerically-critical
-boundaries (frame conventions, unit conventions, schema mismatches), where
-a silent wrong output is the alternative to a clear error.
-
-- The reader of the error should not need to open the source file to fix
-  the problem. Include the remediation snippet, the suggested adapter, or
-  the exact configuration change.
-- Pair with type-tagged contracts (enums, properties) so validation can
-  catch mismatches at construction rather than after data has flowed.
-- Do not auto-correct the situation silently — the user should see the wrap
-  / convert / cast in their own code, not have it inserted under the hood.
-  Auto-correction is exactly the silent-bug pattern this rule prevents.
-
-### Parameters belong inside closures, not alongside them
-
-When a function is parameterized (e.g., a scoring function with
-coefficients), the parameters should be captured at construction time, not
-passed separately at every call site.
-
-- Bad: store `score_fn` and `score_params` as parallel fields, pass params
-  to fn at every evaluation.
-- Good: the scoring callable captures its params in a closure. The call
-  site just invokes `score(state)` with no extra arguments.
-- The closure should be a callable class (not a raw lambda) so that captured
-  parameters are accessible via a `.params` property for serialization and
-  debugging.
-
-### String-keyed dicts are not a typed interface
-
-When a function or factory accepts configuration through `dict[str, float]`
-or `dict[str, Any]`, the caller gets no type checking, no IDE
-autocompletion, and no safe refactoring. A misspelled key (`k_prodd` instead
-of `k_prod`) silently produces a runtime KeyError, not a type error.
-
-- If a function takes more than two related parameters that could be
-  misspelled, group them into a frozen dataclass with named, typed fields.
-- If a factory constructs objects from a parameter set, the parameter set
-  must be a typed dataclass, not a dict. The factory should be generic over
-  the params type.
-- The single place where string-keyed dicts are converted to typed params is
-  a dedicated `from_dict()` or `params_from_dict()` method. No other code
-  should index into a params dict by string key.
-- If two modules need to share parameter values, Python variable binding
-  is sufficient when parameters are typed
-  dataclass fields. No special "sharing" machinery is needed.
-
-### Structural constants and identities belong inside the class
-
-If a constant is intrinsic to a specific class, it must be a `ClassVar` on
-that class, not a module-level variable. Module-level constants are acceptable
-only for values that are genuinely module-wide (e.g., a logger instance, a
-global registry).
-
-- When multiple classes in the same module each have their own structural
-  constants, module-level placement creates ambiguity about which constant
-  belongs to which class.
-- Constants that callers might want to customize should be exposed through
-  the constructor with the `ClassVar` as the default, not frozen at module
-  scope.
-
-### Positional indexing into flat tensors is not an API
-
-If a tensor has semantic slots (e.g., params[0] = rate_constant, params[1] =
-k_m), the mapping must be defined in exactly one place (a frozen dataclass
-with `to_tensor()` / `from_tensor()` methods). No code outside that dataclass
-should index into the tensor by position.
-
-### Notebooks must use the library, not reimplement it
-
-If a notebook contains more than 10 lines of logic that duplicates a library
-class (e.g., a training loop that mirrors the Trainer), that is a bug. The
-notebook should call the library's public API. If the API does not support
-what the notebook needs, extend the API.
-
-- Trainer should return a result object that notebooks can plot directly.
-- If a notebook needs a custom training variant, subclass the Trainer or
-  pass configuration, do not copy-paste the loop.
-
-### Distinguish structural properties from behavioral properties
-
-A domain object often has two kinds of information: what it IS (structure)
-and what it DOES (behavior). These should be represented separately, and
-derived properties should not be conflated with defining properties.
-
-- If two properties of an object seem related but can diverge in edge cases,
-  they are separate concepts and must be stored or computed independently.
-- Properties that can be computed from defining properties should be exposed
-  as derived `@property` methods, not stored as redundant fields. If
-  computation is expensive, use caching.
-
-### Shared utilities live in neutral modules; layering must not invert
+#### Shared utilities live in neutral modules; layering must not invert
 
 When two sibling packages need the same helper, accept the small refactor
 to move it to a shared, neutral module rather than reaching across package
@@ -289,7 +305,7 @@ imports that invert the natural layering are a smell that compounds.
   at the top of the namespace (e.g. `<project_root>/<helper>.py`), not
   inside one of them.
 
-### Organize by dependency layer, not by feature slice, when components are coupled
+#### Organize by dependency layer, not by feature slice, when components are coupled
 
 Vertical feature-slices — one package per feature, each owning its own types,
 logic, and API — work only when the features are genuinely independent. When
@@ -324,7 +340,7 @@ The loop is real in the data and absent from the code.
   modules; layering must not invert* — that rule says don't break the layering;
   this one says how to choose it.
 
-### Never import private symbols across module boundaries
+#### Never import private symbols across module boundaries
 
 If a symbol has a leading underscore, it is internal to its module. Other
 modules must not import it. This is not a suggestion; it is a hard boundary.
@@ -337,7 +353,64 @@ modules must not import it. This is not a suggestion; it is a hard boundary.
   make it public (remove the underscore and commit to the interface) or
   redesign so the import is unnecessary.
 
-### Prefer computable features over manual annotations for ML inputs
+#### Notebooks must use the library, not reimplement it
+
+If a notebook contains more than 10 lines of logic that duplicates a library
+class (e.g., a training loop that mirrors the Trainer), that is a bug. The
+notebook should call the library's public API. If the API does not support
+what the notebook needs, extend the API.
+
+- Trainer should return a result object that notebooks can plot directly.
+- If a notebook needs a custom training variant, subclass the Trainer or
+  pass configuration, do not copy-paste the loop.
+
+---
+
+### E. Validation and errors
+
+#### No silent fallbacks for missing data
+
+If a loss function requires M >= 2 samples to compute variance, and it
+receives M = 1, it must raise a ValueError, not silently return zero. Silent
+fallbacks hide bugs. The caller made an error (passed insufficient data) and
+must be told.
+
+- Never return a zero tensor as a "safe default" for a loss that cannot be
+  computed. This creates a gradient dead zone that is invisible during
+  training.
+- Never silently squeeze, unsqueeze, or reshape tensors to make shapes
+  match. If the input has the wrong number of dimensions, raise a clear error
+  stating the expected and actual shapes.
+- When dispatching on a capability via `hasattr` or `Protocol`, the
+  fallback branch (the object lacks the capability) must raise a clear
+  error if the operation cannot produce correct results without the
+  capability. A silent fallback that returns a plausible but incorrect
+  result is worse than a crash. The only acceptable silent fallback is
+  when the fallback behaviour is provably correct.
+
+#### Validation errors must contain the remediation
+
+When a class rejects an input at construction or call time, the
+`ValueError` (or other exception) message must tell the caller exactly how
+to fix it. "X is not Y" is insufficient; "X is not Y. Wrap it in `Z(...)`."
+is the minimum bar. This is especially load-bearing at numerically-critical
+boundaries (frame conventions, unit conventions, schema mismatches), where
+a silent wrong output is the alternative to a clear error.
+
+- The reader of the error should not need to open the source file to fix
+  the problem. Include the remediation snippet, the suggested adapter, or
+  the exact configuration change.
+- Pair with type-tagged contracts (enums, properties) so validation can
+  catch mismatches at construction rather than after data has flowed.
+- Do not auto-correct the situation silently — the user should see the wrap
+  / convert / cast in their own code, not have it inserted under the hood.
+  Auto-correction is exactly the silent-bug pattern this rule prevents.
+
+---
+
+### F. ML / Neural network specifics
+
+#### Prefer computable features over manual annotations for ML inputs
 
 When deciding what information to feed into a neural network encoder, prefer
 features that can be derived from the existing data structure over manually
@@ -353,28 +426,7 @@ annotated categories.
   alone, enrich the computable features (e.g., add edge features, add
   sensitivity estimates) before resorting to annotations.
 
-### Structural constants must have a single source of truth
-
-When a dimension, count, or schema is determined by one module and consumed
-by another, define it in exactly one place and have all consumers derive
-from that definition. Never duplicate a constant across files, even if both
-files agree on the value today.
-
-- If a feature vector has N channels, define an Enum listing the channels in
-  the module that constructs the vector. Export `N = len(TheEnum)`. Consumers
-  import N rather than hardcoding it.
-- Never store structural constants (dimensions determined by data format) in
-  config. Config is for hyperparameters (values the user chooses). A dimension
-  dictated by the code is not a hyperparameter; it is a derived property.
-- If adding a new channel to a feature vector requires changing more than two
-  locations (the enum + the builder function), the abstraction is leaking.
-- When a field has associated metadata (valid range, unit, description),
-  co-locate the metadata with the field definition. For dataclass fields, use
-  `dataclasses.field(metadata={...})`. A field name that appears in two
-  places (once in the dataclass, once in a separate dict of metadata keyed by
-  string) is a duplication bug waiting to happen.
-
-### Network architecture details must be configurable, not hardcoded
+#### Network architecture details must be configurable, not hardcoded
 
 The number of layers, hidden dimensions, activation functions, and
 conditioning strategies in neural network components are hyperparameters.
@@ -392,22 +444,7 @@ They must live in config dataclasses, not in the constructor body.
   Output-only conditioning limits the network to learning context-independent
   intermediate features, which is unnecessarily restrictive.
 
-### Separate defining parameters from runtime inputs
-
-A domain object's parameters (the values that define what it IS) must be
-distinguished from the inputs it receives at execution time.
-
-- A neural network is defined by its architecture and weights. The input
-  tensor is a runtime argument to `forward()`, not a constructor parameter.
-- A domain model is defined by its structure and parameters. Runtime inputs
-  (initial states, time spans, solver settings) are passed separately at
-  the call site, not stored in the same config or params object.
-- When a factory constructs a domain object, its params dataclass should
-  contain only defining parameters.
-- This separation prevents conflation in sampling, serialization, and
-  composition.
-
-### Train sequential models on one-step objectives first
+#### Train sequential models on one-step objectives first
 
 When training a model that generates sequences (trajectories, time series,
 autoregressive outputs), prefer a one-step prediction loss with teacher
