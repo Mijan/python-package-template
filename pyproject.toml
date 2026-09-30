@@ -9,17 +9,37 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [{ name = "Your Name" }]    # TODO: replace
-dynamic = ["version", "dependencies", "optional-dependencies"]
+dynamic = ["version"]
+dependencies = [
+    "torch",
+    "numpy",
+    "wandb",
+]
+
+# PEP 735 dependency groups. `uv sync` installs the `dev` group by default;
+# tox installs exactly the group each environment needs from `uv.lock`.
+[dependency-groups]
+test = [
+    "pytest>=8",
+    "pytest-cov>=5",
+]
+lint = ["ruff"]
+type = ["mypy"]
+docs = ["interrogate"]
+dev = [
+    "tox>=4",
+    "tox-uv",
+    { include-group = "test" },
+    { include-group = "lint" },
+    { include-group = "type" },
+    { include-group = "docs" },
+]
 
 [tool.setuptools]
 package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.dynamic]
-dependencies = { file = ["requirements.txt"] }
-optional-dependencies.test = { file = ["requirements-test.txt"] }
 
 [tool.setuptools_scm]
 version_scheme = "guess-next-dev"

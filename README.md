@@ -7,10 +7,11 @@ packages with:
 
 -   Modern `src/` layout
 -   A lightweight training profiler with W&B integration
--   Reproducible testing via **tox**
+-   Dependency management and locking via **uv**
+-   Reproducible testing via **tox** (backed by `tox-uv` and `uv.lock`)
 -   Automated CI via **GitHub Actions**
 -   Consistent formatting and static analysis
--   Easy local installation (`pip install -e .`)
+-   One-command local setup (`uv sync`)
 
 It is intended for developers or teams maintaining **multiple internal
 Python packages** who want consistent quality gates and minimal setup
@@ -24,10 +25,12 @@ a larger framework.
 
 ### Packaging
 
--   `pyproject.toml` using **setuptools**
+-   `pyproject.toml` using **setuptools** as the build backend
 -   Versioning via **setuptools_scm**
--   Dependencies loaded from `requirements.txt`
--   Editable installs supported
+-   Runtime dependencies declared in `[project.dependencies]`
+-   Tooling dependencies declared as PEP 735 `[dependency-groups]`
+    (`test`, `lint`, `type`, `docs`, and an umbrella `dev` group)
+-   Exact versions pinned in a committed `uv.lock`
 
 ### ML Training Utilities
 
@@ -37,9 +40,11 @@ a larger framework.
 -   W&B (Weights & Biases) logger for experiment metrics and phase
     timings
 
-### Testing & Quality (tox)
+### Testing & Quality (tox + uv)
 
-Preconfigured environments:
+Every tox environment uses the `uv-venv-lock-runner`, so it is created by
+uv and installed from `uv.lock`. Local runs and CI resolve to identical
+dependency versions. Preconfigured environments:
 
 -   `py312` --- run unit tests with coverage
 -   `lint` --- ruff linting
@@ -50,7 +55,8 @@ Preconfigured environments:
 
 ### Continuous Integration
 
-GitHub Actions workflow (`ci-quality.yml`) provides:
+GitHub Actions workflow (`ci-quality.yaml`) installs uv with
+`astral-sh/setup-uv`, runs `uv sync --locked`, and provides:
 
 -   Formatting checks
 -   Linting
@@ -67,9 +73,10 @@ internal packages.
 ## Repository Structure
 
     .
-    ├── .github/workflows/ci-quality.yml
+    ├── .github/workflows/ci-quality.yaml
+    ├── .python-version
     ├── pyproject.toml
-    ├── requirements.txt
+    ├── uv.lock
     ├── src/package_name/
     │   ├── profiler.py
     │   └── package_code_file.py
@@ -102,34 +109,48 @@ Locations to update:
 
 ### 3. Add Dependencies
 
-Edit:
+Add runtime dependencies with uv, which updates both `pyproject.toml`
+and `uv.lock`:
 
-    requirements.txt
+``` bash
+uv add requests
+uv add --group test hypothesis   # tooling goes into a dependency group
+```
 
-⚠️ Requirements file should contain **only standard requirement
-specifiers**\
-(no `-r`, no `--extra-index-url`, no editable installs).
+Commit `uv.lock` alongside `pyproject.toml`. CI runs with `UV_LOCKED=1`
+and fails if the lock file is out of date, so run `uv lock` after any
+manual edit to `pyproject.toml`.
 
-If you do not want the profiler in a given project, remove `torch`,
-`numpy`, and `wandb` from `requirements.txt` and delete
-`src/package_name/profiler.py`.
+If you do not want the profiler in a given project, run
+`uv remove torch numpy wandb` and delete `src/package_name/profiler.py`.
 
 ### 4. Install Locally
 
+[Install uv](https://docs.astral.sh/uv/getting-started/installation/),
+then:
+
 ``` bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e .
+uv sync
+```
+
+This creates `.venv`, installs the package in editable mode, and installs
+the `dev` dependency group (tox, pytest, ruff, mypy, interrogate). The
+Python version comes from `.python-version`; uv downloads it if needed.
+
+Run anything inside the environment with `uv run`; no activation needed:
+
+``` bash
+uv run python -c "import package_name"
+uv run pytest
 ```
 
 ### 5. Run Quality Checks Locally
 
 ``` bash
-tox
-tox -e lint
-tox -e type
-tox -e format_check
+uv run tox
+uv run tox -e lint
+uv run tox -e type
+uv run tox -e format_check
 ```
 
 ### 6. Enable GitHub Actions
@@ -258,9 +279,9 @@ for epoch in range(num_epochs):
 Typical loop:
 
 1.  Write code
-2.  Run `tox -e format`
-3.  Run `tox`
-4.  Commit & push
+2.  Run `uv run tox -e format`
+3.  Run `uv run tox`
+4.  Commit & push (including `uv.lock` if dependencies changed)
 5.  CI verifies everything
 
 ------------------------------------------------------------------------
@@ -288,8 +309,9 @@ This template is intentionally:
 -   Easy to reason about
 -   Easy to extend
 
-It avoids heavy frameworks (Poetry, Hatch, etc.) unless explicitly
-needed.
+It uses uv for environments and locking but keeps setuptools as the build
+backend, and avoids heavier frameworks (Poetry, Hatch, etc.) unless
+explicitly needed.
 
 ------------------------------------------------------------------------
 

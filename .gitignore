@@ -13,8 +13,13 @@ venv/
 .idea/
 .vscode/
 
-# Tox
+# Tool caches and outputs
 .tox/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+test-results/
 
 # OS
 .DS_Store
